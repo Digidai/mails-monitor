@@ -1,0 +1,27 @@
+{
+  "name": "mails-monitor",
+  "version": "0.1.0",
+  "description": "AI inbox watcher that auto-responds to emails using Claude. A demo for mails-agent.",
+  "type": "module",
+  "bin": {
+    "mails-monitor": "src/index.ts"
+  },
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "keywords": [
+    "email",
+    "ai",
+    "agent",
+    "mails-agent",
+    "claude",
+    "auto-reply"
+  ],
+  "author": "Gene Dai",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "wrangler": "^3.99.0"
+  }
+}
