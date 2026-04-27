@@ -14,6 +14,7 @@ MAILS_API_URL=https://mails-worker.yourdomain.workers.dev
 MAILS_API_TOKEN=your-mails-api-token
 MAILS_MAILBOX=you@yourdomain.com
 # Optional:
+# WEBHOOK_SECRET=same-secret-as-mails-worker
 # SYSTEM_PROMPT="You are a sarcastic robot who replies in haiku."
 ```
 
@@ -52,6 +53,7 @@ mails-monitor Worker (this project)
 | `MAILS_API_URL` | Yes | Base URL of your mails-agent Worker |
 | `MAILS_API_TOKEN` | Yes | Auth token for the mails-agent API |
 | `MAILS_MAILBOX` | Yes | Your email address (used as the "from" address) |
+| `WEBHOOK_SECRET` | No | Verifies `X-Webhook-Signature` from mails-agent when set |
 | `SYSTEM_PROMPT` | No | Custom system prompt for Claude |
 
 ## Development

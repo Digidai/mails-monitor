@@ -3,6 +3,7 @@ interface Env {
   MAILS_API_URL: string
   MAILS_API_TOKEN: string
   MAILS_MAILBOX: string
+  WEBHOOK_SECRET?: string
   SYSTEM_PROMPT?: string
 }
 
@@ -28,7 +29,26 @@ export default {
       return Response.json({ name: "mails-monitor", status: "listening" })
     }
 
-    const payload: WebhookPayload = await request.json()
+    const rawBody = await request.text()
+    if (env.WEBHOOK_SECRET) {
+      const valid = await verifyWebhookSignature(
+        rawBody,
+        request.headers.get("X-Webhook-Signature"),
+        env.WEBHOOK_SECRET
+      )
+      if (!valid) {
+        return Response.json({ error: "Invalid webhook signature" }, { status: 401 })
+      }
+    } else {
+      console.warn("WEBHOOK_SECRET is not set; webhook signature verification is disabled")
+    }
+
+    let payload: WebhookPayload
+    try {
+      payload = JSON.parse(rawBody) as WebhookPayload
+    } catch {
+      return Response.json({ error: "Invalid JSON" }, { status: 400 })
+    }
     if (payload.event !== "message.received") {
       return Response.json({ skipped: true, reason: "not a new message" })
     }
@@ -110,3 +130,38 @@ export default {
     return Response.json({ replied: true, email_id: sent.id })
   },
 } satisfies ExportedHandler<Env>
+
+async function verifyWebhookSignature(
+  body: string,
+  signatureHeader: string | null,
+  secret: string,
+): Promise<boolean> {
+  if (!signatureHeader?.startsWith("sha256=")) return false
+  const expected = await signPayload(body, secret)
+  return timingSafeEqual(signatureHeader, expected)
+}
+
+async function signPayload(body: string, secret: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  )
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(body))
+  const hex = Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+  return `sha256=${hex}`
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return diff === 0
+}

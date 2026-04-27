@@ -42,6 +42,9 @@ for (const v of REQUIRED_VARS) {
 if (process.env.SYSTEM_PROMPT) {
   args.push("--var", `SYSTEM_PROMPT:${process.env.SYSTEM_PROMPT}`)
 }
+if (process.env.WEBHOOK_SECRET) {
+  args.push("--var", `WEBHOOK_SECRET:${process.env.WEBHOOK_SECRET}`)
+}
 
 const workerDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
