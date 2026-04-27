@@ -13,14 +13,31 @@ interface WebhookPayload {
   mailbox: string
   from: string
   subject: string
+  received_at?: string
+  message_id?: string
+  thread_id?: string
 }
 
 interface EmailDetail {
+  id?: string
   from_address: string
   from_name: string
   subject: string
   body_text: string
   direction: string
+  received_at?: string
+  message_id?: string | null
+  thread_id?: string | null
+  in_reply_to?: string | null
+}
+
+interface ThreadEmail {
+  id?: string
+  from_address?: string
+  direction?: string
+  received_at?: string
+  message_id?: string | null
+  in_reply_to?: string | null
 }
 
 export default {
@@ -34,6 +51,7 @@ export default {
       const valid = await verifyWebhookSignature(
         rawBody,
         request.headers.get("X-Webhook-Signature"),
+        request.headers.get("X-Webhook-Signature-V2"),
         env.WEBHOOK_SECRET
       )
       if (!valid) {
@@ -52,12 +70,12 @@ export default {
     if (payload.event !== "message.received") {
       return Response.json({ skipped: true, reason: "not a new message" })
     }
+    if (!payload.email_id) {
+      return Response.json({ error: "Missing email_id" }, { status: 400 })
+    }
 
     // Fetch full email content from mails-agent API
-    const emailRes = await fetch(
-      `${env.MAILS_API_URL}/api/email?id=${payload.email_id}`,
-      { headers: { Authorization: `Bearer ${env.MAILS_API_TOKEN}` } }
-    )
+    const emailRes = await mailsApiFetch(env, `/email?id=${encodeURIComponent(payload.email_id)}`)
     if (!emailRes.ok) {
       return Response.json({ error: "Failed to fetch email" }, { status: 502 })
     }
@@ -67,6 +85,13 @@ export default {
     // Skip outbound emails (our own replies)
     if (email.direction === "outbound") {
       return Response.json({ skipped: true, reason: "outbound email" })
+    }
+    if (email.from_address.toLowerCase() === env.MAILS_MAILBOX.toLowerCase()) {
+      return Response.json({ skipped: true, reason: "self email" })
+    }
+
+    if (await alreadyReplied(env, email)) {
+      return Response.json({ skipped: true, reason: "already replied" })
     }
 
     // Call Claude API to generate a reply
@@ -101,13 +126,15 @@ export default {
     }
 
     const claude: { content: Array<{ text: string }> } = await claudeRes.json()
-    const replyText = claude.content[0]?.text ?? ""
+    const replyText = claude.content[0]?.text?.trim() ?? ""
+    if (!replyText) {
+      return Response.json({ skipped: true, reason: "empty reply" })
+    }
 
     // Send reply via mails-agent API
-    const sendRes = await fetch(`${env.MAILS_API_URL}/api/send`, {
+    const sendRes = await mailsApiFetch(env, "/send", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.MAILS_API_TOKEN}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -115,6 +142,7 @@ export default {
         to: [email.from_address],
         subject: email.subject.startsWith("Re:") ? email.subject : `Re: ${email.subject}`,
         text: replyText,
+        ...(email.message_id ? { in_reply_to: email.message_id } : {}),
       }),
     })
 
@@ -131,14 +159,76 @@ export default {
   },
 } satisfies ExportedHandler<Env>
 
+function apiPrefix(env: Env): "/api" | "/v1" {
+  return env.MAILS_API_TOKEN.startsWith("mk_") || env.MAILS_API_URL === "https://api.mails0.com"
+    ? "/v1"
+    : "/api"
+}
+
+function mailsApiFetch(env: Env, path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers)
+  headers.set("Authorization", `Bearer ${env.MAILS_API_TOKEN}`)
+  const url = new URL(`${apiPrefix(env)}${path}`, env.MAILS_API_URL)
+  return fetch(url.toString(), { ...init, headers })
+}
+
+async function alreadyReplied(env: Env, email: EmailDetail): Promise<boolean> {
+  if (!email.thread_id) return false
+  try {
+    const threadPath = `/thread?id=${encodeURIComponent(email.thread_id)}${apiPrefix(env) === "/api" ? `&to=${encodeURIComponent(env.MAILS_MAILBOX)}` : ""}`
+    const threadRes = await mailsApiFetch(env, threadPath)
+    if (!threadRes.ok) return false
+    const data = await threadRes.json() as { emails?: ThreadEmail[] }
+    const originalMessageId = email.message_id ?? null
+    const originalReceivedAt = Date.parse(email.received_at ?? "")
+    return (data.emails ?? []).some((item) => {
+      if (item.direction !== "outbound") return false
+      if (item.from_address?.toLowerCase() !== env.MAILS_MAILBOX.toLowerCase()) return false
+      if (originalMessageId && item.in_reply_to === originalMessageId) return true
+      if (!Number.isFinite(originalReceivedAt)) return false
+      const sentAt = Date.parse(item.received_at ?? "")
+      return Number.isFinite(sentAt) && sentAt >= originalReceivedAt
+    })
+  } catch {
+    return false
+  }
+}
+
 async function verifyWebhookSignature(
   body: string,
   signatureHeader: string | null,
+  signatureV2Header: string | null,
   secret: string,
 ): Promise<boolean> {
-  if (!signatureHeader?.startsWith("sha256=")) return false
+  if (signatureV2Header) {
+    return verifyTimestampedSignature(body, signatureV2Header, secret)
+  }
+  if (!signatureHeader) return false
   const expected = await signPayload(body, secret)
-  return timingSafeEqual(signatureHeader, expected)
+  const provided = signatureHeader.startsWith("sha256=") ? signatureHeader : `sha256=${signatureHeader}`
+  return timingSafeEqual(provided, expected)
+}
+
+async function verifyTimestampedSignature(
+  body: string,
+  signatureHeader: string,
+  secret: string,
+): Promise<boolean> {
+  const fields = new Map(
+    signatureHeader.split(",").map((part) => {
+      const [key, ...value] = part.split("=")
+      return [key, value.join("=")]
+    })
+  )
+  const timestamp = fields.get("t")
+  const signature = fields.get("v1")
+  if (!timestamp || !signature) return false
+  const ts = Number(timestamp)
+  if (!Number.isFinite(ts)) return false
+  const now = Math.floor(Date.now() / 1000)
+  if (Math.abs(now - ts) > 300) return false
+  const expected = await signPayload(`${timestamp}.${body}`, secret)
+  return timingSafeEqual(`sha256=${signature}`, expected)
 }
 
 async function signPayload(body: string, secret: string): Promise<string> {
